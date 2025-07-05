@@ -1,0 +1,80 @@
+# .gitignore
+
+# --- Python ---
+# Virtual environment
+venv/
+/venv/
+*.venv
+.venv
+
+# Byte-compiled / optimized / C extensions
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Data, State, and Logs ---
+# Do not commit any data, state, or log files.
+# These are runtime artifacts and can be large.
+data/*.db
+data/*.duckdb
+data/*.parquet
+state/
+*.state
+*.flag
+*.counter
+logs/
+*.log
+mlruns/
+results/
+tca_log.duckdb
+
+# --- Models & Secrets ---
+# Models are large binary files and should be managed separately (e.g., with MLflow or DVC)
+models/*.pkl
+models/*.joblib
+
+# Never commit secrets or local configurations
+config.yaml
+secrets.yaml
+*.env
+
+# --- IDE / OS specific files ---
+.idea/
+.vscode/
+*.DS_Store
+.DS_Store?
+
+# --- Prefect ---
+.prefect/
+.prefectignore
+
+# --- Jupyter Notebook ---
+.ipynb_checkpoints
+
+# --- Testing ---
+.pytest_cache/
+.coverage
+htmlcov/

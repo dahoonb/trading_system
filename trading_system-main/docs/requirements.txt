@@ -1,0 +1,66 @@
+# docs/requirements.txt
+
+# Core data and numerical libraries
+numpy>=1.22
+pandas>=2.0
+
+# Configuration
+PyYAML>=6.0
+
+# Date/Time handling
+python-dateutil>=2.8
+pytz
+tzdata # Timezone data for pytz (often a dependency of pytz or pandas)
+
+# Technical Analysis (Python wrapper)
+# The C library (ta-lib) must be installed separately first.
+# See README.md or https://github.com/TA-Lib/ta-lib-python for C library installation.
+TA-Lib>=0.4.24
+
+# Machine Learning & Statistics
+scikit-learn>=1.6.1
+scipy>=1.10
+joblib # For saving/loading scikit-learn models/scalers
+
+# ML Experiment Tracking
+mlflow>=2.22.0
+
+# Feature Store
+# feast[duckdb] installs feast with duckdb support.
+# duckdb and pyarrow are listed separately for clarity as they are important.
+duckdb
+pyarrow # For Parquet support with Feast and DuckDB
+feast[duckdb]
+
+# Distributed Computing & Backtesting Parallelization
+ray[default]
+
+# Workflow Orchestration
+prefect
+prefect-shell # For running shell commands in Prefect flows
+click>=8.0,<8.2 # Often a dependency for CLI tools like Prefect
+
+# Inter-process Communication (ZMQ for heartbeats and commands)
+pyzmq>=25.0.0
+
+# Cloud Storage (AWS S3)
+boto3>=1.20
+
+# Desktop Notifications (Optional, used by Risk Monitor)
+plyer
+
+# Data Validation (used by AlgoWheel config model)
+pydantic
+
+# Common utility, often a transitive dependency but good to list
+six>=1.16
+
+# --- Notes ---
+# ibapi:
+# The Interactive Brokers API ('ibapi') is installed manually.
+# 1. Download the 'TWS API' software from the IBKR Website (Latest version recommended).
+# 2. Run the installer.
+# 3. Navigate to the installation directory (e.g., ~/IBJts/source/pythonclient/ibapi on macOS/Linux).
+# 4. Run 'python setup.py install' from within that directory, using your virtual environment's python.
+
+ruamel.yaml==0.18.6 # For safely writing to YAML files, preserving comments

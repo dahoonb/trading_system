@@ -1,0 +1,48 @@
+# prefect.yaml
+
+# Generic metadata about this project
+name: trading-system-workflows
+prefect-version: 3.4.7 # It's good practice to pin the Prefect version
+
+# The deployments section provides configuration for deploying flows
+deployments:
+- name: nightly-etl-and-model-maintenance
+  version: "1.1"
+  tags:
+    - etl
+    - mlops
+    - daily
+  # --- MODIFICATION: More accurate description ---
+  description: >-
+    Orchestrates the full nightly pipeline: fetches daily market data,
+    calculates TCA features, materializes all features to the online store,
+    and runs the monthly ML model retraining and promotion cycle.
+  
+  entrypoint: prefect_flows/nightly_feature_pipeline.py:nightly_feature_pipeline_flow
+  
+  # --- MODIFICATION: Add parameters for flexibility ---
+  parameters:
+    config_path: "config.yaml"
+
+  work_pool:
+    name: default-worker-pool
+    work_queue_name: null
+    job_variables: {}
+
+  # --- MODIFICATION: Replace hardcoded path with a portable git_clone step ---
+  # This is the standard and recommended way to pull code for deployments.
+  # It ensures the agent always runs the correct version from your repository.
+  pull:
+    - prefect.deployments.steps.git_clone:
+        repository: https://github.com/https://github.com/dahoonb/trading_system.git # <-- REPLACE with your actual Git repository URL
+        branch: main # Or specify a different branch, e.g., 'develop'
+        # Optional: if your repository is private, you'll need to provide an access token
+        # access_token: "{{ prefect.blocks.secret.github-access-token }}" 
+    - prefect.deployments.steps.set_working_directory:
+        directory: trading_system # The name of your repository folder
+
+  schedules:
+  - cron: "5 20 * * 1-5" # Run at 8:05 PM ET on weekdays
+    timezone: "America/New_York"
+    day_or: true
+    active: true
