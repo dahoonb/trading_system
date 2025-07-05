@@ -51,70 +51,126 @@ The system supports live trading, advanced backtesting (including Walk-Forward A
 ## Architecture Diagram
 
 ```mermaid
-graph TD
-    subgraph Main Trading Application (main.py)
-        direction LR
-        IBAPI[IBKR TWS/Gateway] -- Market Data/Fills --> IBW(core/ib_wrapper.py);
-        IBW -- Connects --> DH(data/ib_handler.py);
-        DH -- MarketEvent --> EQ(core/event_queue.py);
-        EQ -- MarketEvent --> STRAT(strategy/);
-        STRAT -- SignalEvent --> EQ;
-        EQ -- SignalEvent --> PM(portfolio/live_manager.py);
-        PM -- OrderEvent --> EQ;
-        PM -- Writes --> RLOG(logs/risk_log.csv);
-        PM -- Writes Logs & Heartbeat --> OSLOG(logs/order_submissions.csv);
-        PM -- Publishes ZMQ/CSV --> HB_MAIN(Main Engine Heartbeat);
-        PM -- Uses --> FEAST_CLIENT([Feast Feature Store Client]);
-        PM -- Uses --> AW_CLIENT([AlgoWheel Client]);
-        PM -- Uses --> ML_MODEL_CLIENT([ML Model Client]);
-        EQ -- OrderEvent --> EH(execution/ib_executor.py);
-        EH -- Places Order --> IBAPI;
-        EH -- Logs Order Submission --> OSLOG;
-        EQ -- FillEvent/OrderFailedEvent --> PM;
-        MAIN_IPC_REP[ZMQ REP Socket @ main.py] -- Listens for Commands --> RM_PROCESS;
+flowchart LR
+    %% === Main Application ===
+    subgraph Main_Trading_Application["Main Trading Application"]
+        direction TB
+        
+        subgraph Event_Bus["Event Bus"]
+            direction TB
+            EQ["core/event_queue.py"]
+        end
+
+        subgraph Data_Execution_Flow["Data & Execution Flow"]
+            direction TB
+            IBAPI["IBKR TWS/Gateway"] -- "Market Data/Fills" --> IBW["core/ib_wrapper.py"]
+            IBW -- "Connects" --> DH["data/ib_handler.py"]
+            DH -- "MarketEvent" --> EQ
+            EH["execution/ib_executor.py"] -- "Places Order" --> IBAPI
+        end
+
+        subgraph Strategy_Portfolio["Strategy & Portfolio Logic"]
+            direction TB
+            STRAT["strategy/"] -- "SignalEvent" --> EQ
+            PM["portfolio/live_manager.py"]
+            EQ -- "MarketEvent" --> STRAT
+            EQ -- "SignalEvent" --> PM
+            EQ -- "OrderEvent" --> EH
+            EQ -- "FillEvent/OrderFailedEvent" --> PM
+        end
+
+        subgraph App_Services["Application Services & Clients"]
+            direction TB
+            FEAST_CLIENT["Feast Client"]
+            AW_CLIENT["AlgoWheel Client"]
+            ML_MODEL_CLIENT["ML Client"]
+            FEAST_CLIENT -- "Uses" --> PM
+            AW_CLIENT -- "Uses" --> PM
+            ML_MODEL_CLIENT -- "Uses" --> PM
+        end
     end
 
-    subgraph Independent Risk Monitor (risk_monitor.py)
-        direction LR
-        RM_PROCESS(risk_monitor.py Process);
-        RM_PROCESS -- Subscribes ZMQ/Reads CSV --> HB_MAIN;
-        RM_PROCESS -- Tails --> OSLOG;
-        RM_PROCESS -- Reads --> RLOG;
-        RM_PROCESS -- Checks for Manual Flag --> KNF(flags/KILL_NOW.flag);
-        RM_PROCESS -- Creates System Flag --> KF(flags/KILL.flag);
-        RM_PROCESS -- Publishes Own Heartbeat --> RM_HB(logs/risk_monitor_heartbeat.json);
-        RM_PROCESS -- Connects to IBKR --> IBAPI_RM[IBKR TWS/Gateway (RM)];
-        RM_PROCESS -- Fetches Account Data --> IBAPI_RM;
-        RM_PROCESS -- Sends Commands via ZMQ REQ --> MAIN_IPC_REP;
+    %% === Independent Services & Monitors ===
+    subgraph Independent_Processes["Independent Processes"]
+        direction TB
+        
+        subgraph Risk_Monitor["Risk Monitor"]
+            direction TB
+            RM_PROCESS["risk_monitor.py Process"]
+            MAIN_IPC_REP["ZMQ REP Socket"] -- "Commands" --> RM_PROCESS
+        end
+
+        subgraph System_Flags["System Flags & Signals"]
+            direction TB
+            KNF["flags/KILL_NOW.flag"]
+            KF["flags/KILL.flag"]
+        end
     end
 
-    subgraph External Services and Data Stores
-        FEAST_FS[("Feast Feature Store\n(DuckDB/SQLite)")]
-        TCA_DB[("TCA DuckDB\n(results/tca_log.duckdb)")]
-        ML_MODELS_STORE[("ML Models\n(models/)")]
+    %% === External Dependencies ===
+    subgraph External_Services_Data["External Services & Data"]
+        direction TB
+        
+        subgraph Data_Stores["Data Stores"]
+            direction TB
+            FEAST_FS["Feast Feature Store<br>(DuckDB/SQLite)"]
+            TCA_DB["TCA DuckDB"]
+            ML_MODELS_STORE["ML Models"]
+        end
+
+        subgraph Log_Files["Log Files"]
+            direction TB
+            RLOG["logs/risk_log.csv"]
+            OSLOG["logs/order_submissions.csv"]
+            RM_HB["logs/risk_monitor_heartbeat.json"]
+        end
+
+        subgraph External_Connections["External Connections"]
+            direction TB
+            IBAPI_RM["IBKR TWS/Gateway (RM)"]
+            HB_MAIN["Main Engine<br>Heartbeat"]
+        end
     end
 
-    FEAST_CLIENT -- Fetches Features --> FEAST_FS;
-    AW_CLIENT -- Reads TCA Data --> TCA_DB;
-    ML_MODEL_CLIENT -- Loads Model --> ML_MODELS_STORE;
-    PM -- Logs Trades for TCA --> TCA_DB;
+    %% === Connections Between Subgraphs ===
+    PM -- "Logs Trades for TCA" --> TCA_DB
+    PM -- "Writes" --> RLOG
+    PM -- "Writes Logs & Heartbeat" --> OSLOG
+    PM -- "Publishes" --> HB_MAIN
+    KF -- "Signals Main App to Halt" --> PM
 
-    KF -- Signals Main App to Halt --> PM;
+    FEAST_CLIENT -- "Fetches Features" --> FEAST_FS
+    AW_CLIENT    -- "Reads TCA Data"   --> TCA_DB
+    ML_MODEL_CLIENT -- "Loads Model"   --> ML_MODELS_STORE
 
-    style IBAPI fill:#f9f,stroke:#333,stroke-width:2px
-    style IBAPI_RM fill:#f9f,stroke:#333,stroke-width:2px
-    style EQ fill:#ccf,stroke:#333,stroke-width:2px
-    style PM fill:#lightgreen,stroke:#333,stroke-width:2px
-    style RM_PROCESS fill:#lightblue,stroke:#333,stroke-width:2px
-    style RLOG fill:#FFDAB9,stroke:#333
-    style OSLOG fill:#FFDAB9,stroke:#333
-    style KF fill:#ff6347,stroke:#333,stroke-width:2px
-    style KNF fill:#ffcc00,stroke:#333
-    style HB_MAIN fill:#f0e68c,stroke:#333
-    style RM_HB fill:#f0e68c,stroke:#333
-    style FEAST_FS fill:#add8e6,stroke:#333
-    style TCA_DB fill:#add8e6,stroke:#333
-    style ML_MODELS_STORE fill:#add8e6,stroke:#333
+    RM_PROCESS -- "Subscribes" --> HB_MAIN
+    RM_PROCESS -- "Tails"      --> OSLOG
+    RM_PROCESS -- "Reads"      --> RLOG
+    RM_PROCESS -- "Checks for" --> KNF
+    RM_PROCESS -- "Creates"    --> KF
+    RM_PROCESS -- "Publishes"  --> RM_HB
+    RM_PROCESS -- "Connects"   --> IBAPI_RM
+
+    %% === Styling ===
+    classDef coreComponent     fill:#cde4ff,stroke:#4a69bd;
+    classDef externalInterface fill:#ffc0cb,stroke:#8b0000;
+    classDef dataStore         fill:#b2dfdb,stroke:#004d40;
+    classDef logFile           fill:#fff59d,stroke:#f57f17;
+    classDef process           fill:#d1c4e9,stroke:#4527a0;
+    classDef criticalSignal    fill:#ffab91,stroke:#bf360c;
+    classDef client            fill:#e6e6fa,stroke:#333;
+    classDef subText           color:#000;
+
+    %% assign style classes
+    class EQ,IBAPI,IBW,DH,EH,STRAT,PM,FEAST_CLIENT,AW_CLIENT,ML_MODEL_CLIENT,RM_PROCESS,KNF,KF,FEAST_FS,TCA_DB,ML_MODELS_STORE,RLOG,OSLOG,RM_HB,IBAPI_RM,HB_MAIN subText;
+
+    class PM,STRAT,DH,IBW,EH,EQ coreComponent;
+    class IBAPI,IBAPI_RM externalInterface;
+    class FEAST_FS,TCA_DB,ML_MODELS_STORE dataStore;
+    class RLOG,OSLOG,RM_HB,HB_MAIN logFile;
+    class RM_PROCESS process;
+    class KNF,KF criticalSignal;
+    class FEAST_CLIENT,AW_CLIENT,ML_MODEL_CLIENT client;
 ```
 
 ## Project Structure
