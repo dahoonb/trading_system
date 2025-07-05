@@ -48,7 +48,7 @@ async def nightly_feature_pipeline_flow(config_path: str = "config.yaml"):
 
     # --- MODIFICATION: Add the new TCA ETL task to the flow ---
     # This task can run in parallel with other feature generation tasks.
-    tca_etl_future = await run_tca_feature_etl_task.submit()
+    tca_etl_future = run_tca_feature_etl_task.submit()
 
     # Placeholder for other daily tasks like materialization
     # e.g., materialize_future = await run_feast_materialize_task.submit(wait_for=[tca_etl_future])
@@ -63,9 +63,10 @@ async def nightly_feature_pipeline_flow(config_path: str = "config.yaml"):
         # ml_training_final_status_msg = await ml_trainer_future.result(raise_on_failure=False)
         ml_training_final_status_msg = "ML Training would run here, now with TCA features available."
 
+    tca_etl_result = await tca_etl_future.result(raise_on_failure=False)
 
     flow_logger.info("--- Nightly Pipeline Finished ---")
-    flow_logger.info(f"  TCA Feature ETL Status: {await tca_etl_future.result(raise_on_failure=False)}")
+    flow_logger.info(f"  TCA Feature ETL Status: {tca_etl_result}")
     flow_logger.info(f"  ML Training Status: {ml_training_final_status_msg}")
 
 if __name__ == "__main__":
