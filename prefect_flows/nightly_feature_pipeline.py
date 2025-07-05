@@ -19,9 +19,6 @@ async def run_tca_feature_etl_task():
     task_run_logger.info(f"Executing TCA Feature ETL command: '{command}'")
     
     try:
-        # --- CORRECTED RESULT HANDLING ---
-        # The return value of shell_run_command is now a single string of the stdout.
-        # We also set return_all=False (or omit it) as we only run one command.
         stdout_result = await shell_run_command(command=command)
         
         task_run_logger.info(f"TCA Feature ETL STDOUT:\n{stdout_result}")
@@ -40,14 +37,18 @@ async def nightly_feature_pipeline_flow(config_path: str = "config.yaml"):
     flow_logger = get_run_logger()
     flow_logger.info(f"Starting Nightly ETL & Training Pipeline Flow using config: {config_path}")
 
-    tca_etl_future = run_tca_feature_etl_task.submit()
+    tca_etl_result = await run_tca_feature_etl_task()
+
+    # If you needed to run tasks in parallel, the pattern would be:
+    # future = task.submit()
+    # result = await future.result()
+    # The previous code was just missing the await on the final .result() call.
+    # But for this simple flow, direct await is cleaner.
     
     ml_training_final_status_msg = "SKIPPED_NOT_FIRST_OF_MONTH"
     if datetime.date.today().day == 1:
         flow_logger.info("First of the month: Triggering ML model training cycle.")
         ml_training_final_status_msg = "ML Training would run here, now with TCA features available."
-
-    tca_etl_result = await tca_etl_future.result(raise_on_failure=False)
 
     flow_logger.info("--- Nightly Pipeline Finished ---")
     flow_logger.info(f"  TCA Feature ETL Status: {tca_etl_result}")
