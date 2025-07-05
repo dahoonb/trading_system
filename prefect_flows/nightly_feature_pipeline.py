@@ -39,12 +39,12 @@ async def run_tca_feature_etl_task():
         task_run_logger.error(f"TCA Feature ETL script failed: {e}", exc_info=True)
         raise
 
-@flow(name="Nightly Feature Engineering and Model Training Pipeline",
-      description="Orchestrates daily feature creation, TCA feature ETL, and monthly ML model training.",
+@flow(name="nightly-feature-pipeline-flow",
+      description="...",
       log_prints=True)
-async def nightly_feature_pipeline_flow():
+async def nightly_feature_pipeline_flow(config_path: str = "config.yaml"):
     flow_logger = get_run_logger()
-    flow_logger.info("Starting Nightly ETL & Training Pipeline Flow...")
+    flow_logger.info(f"Starting Nightly ETL & Training Pipeline Flow using config: {config_path}")
 
     # --- MODIFICATION: Add the new TCA ETL task to the flow ---
     # This task can run in parallel with other feature generation tasks.
