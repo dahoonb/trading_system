@@ -6,7 +6,6 @@ from prefect_shell import shell_run_command
 import os
 import datetime
 
-# --- NEW TASK DEFINITION ---
 @task(name="Run Primary Feature ETL", retries=1, tags=["etl", "features"])
 async def run_primary_feature_etl_task():
     """
@@ -57,13 +56,14 @@ async def nightly_feature_pipeline_flow(config_path: str = "config.yaml"):
     flow_logger = get_run_logger()
     flow_logger.info(f"Starting Nightly ETL & Training Pipeline Flow using config: {config_path}")
 
-    # --- MODIFIED LOGIC: Run both ETL tasks in parallel ---
     primary_etl_future = run_primary_feature_etl_task.submit()
     tca_etl_future = run_tca_feature_etl_task.submit()
     
-    # Wait for both to complete
-    primary_etl_result = await primary_etl_future.result(raise_on_failure=False)
-    tca_etl_result = await tca_etl_future.result(raise_on_failure=False)
+    # --- CORRECTED RESULT RETRIEVAL ---
+    # The .result() method on a future blocks until the result is available.
+    # It should NOT be awaited.
+    primary_etl_result = primary_etl_future.result(raise_on_failure=False)
+    tca_etl_result = tca_etl_future.result(raise_on_failure=False)
     
     ml_training_final_status_msg = "SKIPPED_NOT_FIRST_OF_MONTH"
     if datetime.date.today().day == 1:
