@@ -1,5 +1,5 @@
 # feature_repo/feature_store.yaml
-project: equity_trading_system
+project: trading_system
 registry: data/registry.db
 provider: local
 online_store:

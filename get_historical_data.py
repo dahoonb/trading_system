@@ -1,117 +1,112 @@
 # get_historical_data.py
 
 import argparse
-import asyncio
 import os
 import logging
 import sys
+import pandas as pd
+import yfinance as yf
+from tqdm import tqdm
+from datetime import datetime
+import time
 
 # --- Project Root Setup ---
-# This ensures the script can find all the necessary modules
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from core.config_loader import config
-from etl.fetch_daily_bars import fetch_daily_bars_task
 from utils.logger import setup_logger
 
-# Setup a logger for this script
 logger = setup_logger(logger_name="HistoricalDataDownloader", log_level=logging.INFO)
 
-async def main_async(duration: str, symbols: list, output_dir: str):
-    """
-    Asynchronous main function to orchestrate the data fetching and saving.
-    """
-    logger.info("--- Starting Historical Data Download ---")
-    
-    # Get IB connection details from the global config
-    ib_config = config.get('ib_connection', {})
-    if not ib_config:
-        logger.critical("IB connection settings not found in config.yaml. Aborting.")
-        return
-
+def get_sp500_tickers() -> list[str]:
+    """Fetches the current list of S&P 500 tickers from Wikipedia."""
     try:
-        # Await the Prefect task directly. It's just an async function.
-        fetched_data = await fetch_daily_bars_task.fn(
-            ib_config=ib_config,
-            symbols=symbols,
-            duration=duration
-        )
-    except ConnectionError as e:
-        logger.critical(f"Failed to connect to Interactive Brokers: {e}")
-        logger.critical("Please ensure TWS or IB Gateway is running and you are logged in.")
-        return
+        logger.info("Fetching S&P 500 ticker list from Wikipedia...")
+        payload = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
+        tickers = payload[0]['Symbol'].tolist()
+        tickers = [t.replace('.', '-') for t in tickers]
+        logger.info(f"Successfully fetched {len(tickers)} S&P 500 tickers.")
+        return tickers
     except Exception as e:
-        logger.error(f"An unexpected error occurred during data fetching: {e}", exc_info=True)
-        return
+        logger.error(f"Could not fetch S&P 500 tickers: {e}. Returning empty list.")
+        return []
 
-    if not fetched_data:
-        logger.warning("No data was fetched. Please check symbols and connection.")
-        return
+def download_and_save_data(start_date: str, end_date: str, symbols: list, output_dir: str):
+    """
+    Downloads and saves historical stock data ONE TICKER AT A TIME to ensure
+    maximum reliability and correct CSV formatting.
+    """
+    logger.info(f"--- Starting Historical Data Download for {len(symbols)} symbols (one by one) ---")
+    logger.info(f"Period: {start_date} to {end_date}")
 
-    # Ensure the output directory exists
     os.makedirs(output_dir, exist_ok=True)
-    logger.info(f"Saving historical data to directory: '{output_dir}'")
+    successful_downloads = 0
 
-    for symbol, df in fetched_data.items():
-        if df.empty:
-            logger.warning(f"No data returned for {symbol}. Skipping.")
-            continue
+    for symbol in tqdm(symbols, desc="Downloading Tickers"):
+        try:
+            # yfinance returns a DataFrame with a MultiIndex on columns, even for one ticker.
+            data = yf.download(
+                tickers=symbol,
+                start=start_date,
+                end=end_date,
+                auto_adjust=True,
+                progress=False,
+            )
 
-        output_path = os.path.join(output_dir, f"{symbol}.csv")
+            if data.empty:
+                logger.warning(f"No data returned for {symbol}. It may be delisted or have no data for the period.")
+                continue
+
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+
+            # --- Standard Saving Logic ---
+            data.rename(columns={
+                'Open': 'open', 'High': 'high', 'Low': 'low',
+                'Close': 'close', 'Volume': 'volume'
+            }, inplace=True)
+            
+            data.index.name = 'date'
+            output_path = os.path.join(output_dir, f"{symbol}.csv")
+            data.reset_index(inplace=True)
+            data.to_csv(output_path, index=False, date_format='%Y-%m-%d')
+            successful_downloads += 1
+
+        except Exception as e:
+            logger.error(f"An error occurred while downloading {symbol}: {e}")
         
-        # --- Standardize the DataFrame format ---
-        # The rest of the system expects lowercase column names and a 'date' column.
-        df.reset_index(inplace=True)
-        df.rename(columns={
-            'index': 'date',
-            'Open': 'open',
-            'High': 'high',
-            'Low': 'low',
-            'Close': 'close',
-            'Volume': 'volume'
-        }, inplace=True, errors='ignore') # Use errors='ignore' in case columns are already lowercase
-        
-        # Ensure the required columns exist
-        required_cols = ['date', 'open', 'high', 'low', 'close', 'volume']
-        df = df[[col for col in required_cols if col in df.columns]]
+        time.sleep(0.1)
 
-        # Save to CSV
-        df.to_csv(output_path, index=False)
-        logger.info(f"Successfully saved {len(df)} rows for {symbol} to {output_path}")
-
-    logger.info("--- Historical Data Download Complete ---")
+    logger.info(f"--- Historical Data Download Complete ---")
+    logger.info(f"Successfully downloaded data for {successful_downloads} out of {len(symbols)} requested symbols.")
+    logger.info(f"Files are located in '{output_dir}'")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Download historical daily bar data from Interactive Brokers.")
+    parser = argparse.ArgumentParser(description="Download historical daily bar data using yfinance.")
     
-    parser.add_argument(
-        "--duration",
-        type=str,
-        default="3 Y",
-        help="The duration of historical data to fetch (e.g., '1 D', '5 Y'). Default: '3 Y'."
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="data/historical_csv",
-        help="The directory to save the output CSV files. Default: 'data/historical_csv'."
-    )
-    parser.add_argument(
-        "--symbols",
-        nargs='+',
-        default=None,
-        help="A space-separated list of symbols to fetch. Overrides symbols from config.yaml."
-    )
+    parser.add_argument("--start-date", type=str, default="2007-01-01", help="The start date (YYYY-MM-DD).")
+    parser.add_argument("--end-date", type=str, default=datetime.now().strftime('%Y-%m-%d'), help="The end date (YYYY-MM-DD).")
+    parser.add_argument("--output-dir", type=str, default="data/historical_csv", help="The output directory.")
+    parser.add_argument("--universe", type=str, default="config", choices=['config', 'sp500'], help="The symbol universe to download.")
+    parser.add_argument("--symbols", nargs='+', default=None, help="Custom list of symbols, overrides --universe.")
 
     args = parser.parse_args()
 
-    # Determine which symbols to use
-    symbols_to_fetch = args.symbols if args.symbols else config.get('symbols', [])
+    symbols_to_fetch = []
+    if args.symbols:
+        logger.info(f"Using custom symbol list provided via --symbols argument.")
+        symbols_to_fetch = args.symbols
+    elif args.universe == 'sp500':
+        logger.info("Selected 'sp500' universe.")
+        symbols_to_fetch = get_sp500_tickers()
+    else:
+        logger.info("Selected 'config' universe. Using symbols from config.yaml.")
+        symbols_to_fetch = config.get('symbols', [])
+
     if not symbols_to_fetch:
-        logger.critical("No symbols specified via command line or in config.yaml. Aborting.")
+        logger.critical("No symbols specified or found. Aborting.")
         sys.exit(1)
 
-    # Run the asynchronous main function
-    asyncio.run(main_async(args.duration, symbols_to_fetch, args.output_dir))
+    download_and_save_data(args.start_date, args.end_date, symbols_to_fetch, args.output_dir)

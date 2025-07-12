@@ -3,7 +3,7 @@
 # --- Python ---
 # Virtual environment
 venv/
-/venv/
+​/venv/
 *.venv
 .venv
 
@@ -21,7 +21,7 @@ develop-eggs/
 dist/
 downloads/
 eggs/
-.eggs/
+.eggs
 lib/
 lib64/
 parts/
@@ -30,7 +30,7 @@ var/
 wheels/
 pip-wheel-metadata/
 share/python-wheels/
-*.egg-info/
+*.egg-info
 .installed.cfg
 *.egg
 MANIFEST
@@ -41,7 +41,9 @@ MANIFEST
 data/*.db
 data/*.duckdb
 data/*.parquet
-state/
+data/*.parquet
+data/historical_csv/
+feature_repo/data/
 *.state
 *.flag
 *.counter
@@ -55,10 +57,12 @@ tca_log.duckdb
 # Models are large binary files and should be managed separately (e.g., with MLflow or DVC)
 models/*.pkl
 models/*.joblib
+models/production_metrics.json
 
 # Never commit secrets or local configurations
 config.yaml
 secrets.yaml
+prefect.yaml
 *.env
 
 # --- IDE / OS specific files ---
@@ -78,3 +82,6 @@ secrets.yaml
 .pytest_cache/
 .coverage
 htmlcov/
+
+# --- Generated files ---
+folder_structure.txt

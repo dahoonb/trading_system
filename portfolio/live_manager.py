@@ -3,140 +3,172 @@
 import queue
 from datetime import datetime
 import pandas as pd
-import feast
-import joblib
-import os
 import logging
 from typing import Dict, List, Optional
 
 from core.events import OrderEvent, SignalEvent, FillEvent, MarketEvent
-from portfolio.shared_sizing_logic import get_atr_volatility_adjusted_size
-from portfolio.algo_wheel import AlgoWheel
-from portfolio.monthly_counter import MonthlyCounter
 from portfolio.risk_manager import RiskManager
-from portfolio.optimizer import PortfolioOptimizer
+from portfolio.allocation import get_hrp_weights
+from strategy.base import BaseStrategy
+from strategy.quality_value import QualityValueStrategy
+from strategy.low_volatility import LowVolatilityStrategy
+from strategy.cross_sectional_momentum import CrossSectionalMomentumStrategy
 from core.config_loader import config as global_config
-from strategy.momentum import MovingAverageCrossoverStrategy
-from strategy.mean_reversion import RsiMeanReversionStrategy
 
 logger = logging.getLogger("TradingSystem")
 
 class LivePortfolioManager:
     """
-    The LivePortfolioManager is the core strategic component of the trading
-    system, orchestrating risk, optimization, and order generation.
-    It can be initialized with a specific configuration for backtesting.
+    The LivePortfolioManager orchestrates the new multi-factor portfolio. It is
+    responsible for:
+    1.  Instantiating and managing the underlying trading strategies.
+    2.  Periodically calculating optimal capital allocation between strategies using
+        Hierarchical Risk Parity (HRP).
+    3.  Processing signals from strategies and sizing trades based on the
+        strategy's allocated capital.
+    4.  Applying portfolio-level risk management (e.g., drawdown controls).
+    5.  Maintaining the current state of holdings and cash for each strategy sleeve.
     """
-    def __init__(self, event_queue: queue.Queue, symbol_list: list, initial_capital: float, 
-                 feature_repo_path: str, backtest_mode: bool = False, config_override: Optional[Dict] = None):
-        
-        # Use the provided config override, or fall back to the global config
-        self.config = config_override if config_override is not None else global_config
-        
-        self.event_queue = event_queue
-        self.symbol_list = symbol_list
-        self.initial_capital = initial_capital
-        self.cash = initial_capital
-        self.backtest_mode = backtest_mode
-        
-        self.fill_counter = MonthlyCounter(persistence_filepath="state/fill_counter_state.json", config_override=self.config)
-        self.algo_wheel = AlgoWheel(tca_db_path="data/tca_log.duckdb", config_override=self.config)
-        self.risk_manager = RiskManager(initial_capital=initial_capital, config_override=self.config)
-        
-        strategy_ids = list(self.config.get('strategies', {}).keys())
-        self.optimizer = PortfolioOptimizer(strategy_ids=strategy_ids, config_override=self.config)
-        
-        if not self.backtest_mode:
-            self.feature_store = feast.FeatureStore(repo_path=feature_repo_path)
-            self.ml_model_path = self.config.get('ml_models', {}).get('signal_veto_model_path', 'models/ml_vetoing_model.pkl')
-            try:
-                self.ml_model = joblib.load(self.ml_model_path)
-                logger.info(f"Successfully loaded ML vetoing model from {self.ml_model_path}.")
-            except FileNotFoundError:
-                self.ml_model = None
-                logger.warning(f"ML vetoing model not found at '{self.ml_model_path}'.")
-        else:
-            self.feature_store = None
-            self.ml_model = None
-            logger.info("LivePortfolioManager running in backtest mode. ML/Feast disabled.")
+    def __init__(self,
+                 event_queue: queue.Queue,
+                 symbol_list: list, # This is the full alpha universe
+                 trading_universe: list, # This is the smaller tradable set
+                 initial_capital: float,
+                 feature_repo_path: str,
+                 backtest_mode: bool = False,
+                 config_override: Optional[Dict] = None):
+        """
+        Initializes the LivePortfolioManager.
 
-        self.latest_market_data = {symbol: {} for symbol in self.symbol_list}
-        self.holdings = {sid: {sym: {'shares': 0, 'cost_basis': 0.0} for sym in symbol_list} for sid in strategy_ids}
-        self.strategy_cash = {sid: initial_capital / len(strategy_ids) if strategy_ids else 0 for sid in strategy_ids}
-        self.last_day_equity = {sid: initial_capital / len(strategy_ids) if strategy_ids else 0 for sid in strategy_ids}
-        
-        self.strategies = {}
-        strategy_configs = self.config.get('strategies', {})
-        for strategy_name, details in strategy_configs.items():
-            if details.get('enabled'):
-                params = {k: v for k, v in details.items() if k != 'enabled'}
-                if strategy_name == 'momentum_ma':
-                    self.strategies[strategy_name] = MovingAverageCrossoverStrategy(self.event_queue, self.symbol_list, strategy_id=strategy_name, **params)
-                elif strategy_name == 'mean_reversion_rsi':
-                    self.strategies[strategy_name] = RsiMeanReversionStrategy(self.event_queue, self.symbol_list, strategy_id=strategy_name, **params)
+        Args:
+            event_queue (queue.Queue): The main system event queue.
+            symbol_list (list): The list of symbols for signal generation (alpha universe).
+            trading_universe (list): The list of symbols the system can actually trade.
+            initial_capital (float): The total starting capital for the portfolio.
+            feature_repo_path (str): The path to the Feast feature repository.
+            backtest_mode (bool): Flag to indicate if running in backtest mode.
+            config_override (Optional[Dict]): A dictionary to override global config values.
+        """
+        self.config = config_override if config_override is not None else global_config
+        self.event_queue = event_queue
+        self.symbol_list = symbol_list # Store the alpha universe
+        self.trading_universe = trading_universe # Store the trading universe
+        self.initial_capital = initial_capital
+        self.backtest_mode = backtest_mode
+
+        self.risk_manager = RiskManager(initial_capital=initial_capital)
+
+        # --- Instantiate the new strategies ---
+        # In a live system, these strategies would use a real-time feature store.
+        # In backtesting, their internal dataframes will be populated by the engine.
+        self.strategies: Dict[str, BaseStrategy] = {
+            'quality_value': QualityValueStrategy(self.event_queue, self.symbol_list, 'quality_value', feature_repo_path=feature_repo_path),
+            'low_volatility': LowVolatilityStrategy(self.event_queue, self.symbol_list, 'low_volatility', feature_repo_path=feature_repo_path),
+            'cross_sectional_momentum': CrossSectionalMomentumStrategy(self.event_queue, self.symbol_list, 'cross_sectional_momentum')
+        }
+        strategy_ids = list(self.strategies.keys())
+        logger.info(f"PortfolioManager initialized with strategies: {strategy_ids}")
+
+        # --- HRP-based allocation state ---
+        # Start with equal weights until enough data is gathered for HRP.
+        self.strategy_weights = {sid: 1.0 / len(strategy_ids) for sid in strategy_ids}
+        self.strategy_returns_df = pd.DataFrame(columns=strategy_ids)
+        self.allocation_lookback = self.config.get('portfolio_optimizer', {}).get('performance_lookback_days', 126) # Default to ~6 months
+        self.last_allocation_date: Optional[datetime.date] = None
+
+        # --- Portfolio State Tracking ---
+        self.latest_market_data: Dict[str, Dict] = {symbol: {} for symbol in self.symbol_list}
+        self.holdings: Dict[str, Dict] = {sid: {sym: {'shares': 0, 'cost_basis': 0.0} for sym in symbol_list} for sid in strategy_ids}
+        self.strategy_cash: Dict[str, float] = {sid: initial_capital * self.strategy_weights[sid] for sid in strategy_ids}
+        self.last_day_equity: Dict[str, float] = self.strategy_cash.copy()
 
     def process_market_data(self, event: MarketEvent):
-        """Processes a market event by fanning it out to all strategies."""
+        """
+        Updates market data and fans out the event to all strategies so they
+        can calculate their signals.
+        """
         self.update_holdings(event)
         for strategy in self.strategies.values():
             strategy.calculate_signals(event)
 
     def update_holdings(self, event: MarketEvent):
+        """Stores the latest market data for valuation purposes."""
         if event.type == 'MARKET':
             self.latest_market_data[event.symbol] = event.data
 
     def process_signal(self, event: SignalEvent):
-        """Processes a signal, applying all layers of risk and optimization."""
-        if self.fill_counter.is_budget_exceeded(): return
-
-        if self.ml_model and not self._is_signal_ml_approved(event.symbol):
-            logger.info(f"ML Model VETOED signal for {event.symbol}.")
+        """
+        Processes a signal from a strategy, sizes the trade based on the
+        strategy's dedicated capital, and creates an OrderEvent.
+        """
+        strategy_id = event.strategy_id
+        if strategy_id not in self.strategies:
+            logger.warning(f"Received signal for unknown strategy_id: {strategy_id}")
             return
 
         price = self.latest_market_data.get(event.symbol, {}).get('close', 0)
-        if price <= 0: return
-            
-        strategy_id = event.strategy_id
-        strategy_weights = self.optimizer.get_weights()
-        strategy_weight = strategy_weights.get(strategy_id, 1.0 / len(self.optimizer.strategy_ids) if self.optimizer.strategy_ids else 1.0)
-        capital_base = self.risk_manager.current_equity * strategy_weight
-        
-        atr = self._get_latest_atr(event.symbol) or price * 0.02
-        quantity = get_atr_volatility_adjusted_size(
-            capital=capital_base,
-            risk_per_trade_pct=self.config['portfolio']['risk_per_trade_pct'],
-            price=price,
-            atr=atr
+        if price <= 0:
+            logger.warning(f"Cannot process signal for {event.symbol}; price is zero or unavailable.")
+            return
+
+        # --- Position Sizing based on Strategy's Capital Sleeve ---
+        strategy_market_value = sum(
+            data['shares'] * self.latest_market_data.get(symbol, {}).get('close', 0)
+            for symbol, data in self.holdings[strategy_id].items()
         )
+        strategy_equity = self.strategy_cash[strategy_id] + strategy_market_value
 
+        # Apply portfolio-level drawdown throttle to the strategy's capital base
         drawdown_scale = self.risk_manager.get_risk_scaling_factor()
-        volatility_scale = self.optimizer.get_volatility_scaling_factor()
-        final_quantity = int(quantity * drawdown_scale * volatility_scale)
+        capital_base = strategy_equity * drawdown_scale
 
-        if final_quantity == 0: return
+        # Determine position size. Here, we use a simple equal-weighting within the strategy.
+        # Each stock in the strategy's target portfolio gets an equal slice of the strategy's capital.
+        target_portfolio_size = getattr(self.strategies[strategy_id], 'max_portfolio_size', 20)
+        dollar_amount_per_stock = capital_base / target_portfolio_size if target_portfolio_size > 0 else 0
+        target_quantity = int(dollar_amount_per_stock / price) if price > 0 else 0
 
-        order_context = {'order_size': final_quantity, 'volatility': atr / price}
-        order_type = self.algo_wheel.get_execution_decision(event.symbol, order_context)
-        
-        order_direction = 'BUY' if event.direction == 'LONG' else 'SELL'
+        if target_quantity == 0 and event.direction == 'LONG':
+             logger.debug(f"Calculated target quantity for {event.symbol} is zero. No order generated.")
+             return
+
+        # --- NEW: Add the final execution filter ---
+        if event.symbol not in self.trading_universe:
+            logger.debug(f"Signal for {event.symbol} ignored: not in trading universe.")
+            return
+
+        # --- Generate Order based on Signal ---
         current_position = self.holdings[strategy_id][event.symbol]['shares']
-        if (event.direction == 'LONG' and current_position < 0) or (event.direction == 'SHORT' and current_position > 0):
-            final_quantity += abs(current_position)
 
-        order = OrderEvent(strategy_id, event.symbol, order_type, final_quantity, order_direction, arrival_price=price)
-        self.event_queue.put(order)
-        logger.info(f"Portfolio Manager: Generated {order}")
+        if event.direction == 'EXIT':
+            if current_position > 0:
+                order = OrderEvent(strategy_id, event.symbol, 'MKT', abs(current_position), 'SELL')
+                self.event_queue.put(order)
+                logger.info(f"Generated EXIT order for {strategy_id}: SELL {abs(current_position)} {event.symbol}")
+        elif event.direction == 'LONG':
+            trade_quantity = target_quantity - current_position
+            if trade_quantity > 0:
+                order = OrderEvent(strategy_id, event.symbol, 'MKT', trade_quantity, 'BUY')
+                self.event_queue.put(order)
+                logger.info(f"Generated LONG order for {strategy_id}: BUY {trade_quantity} {event.symbol}")
+            elif trade_quantity < 0:
+                # This can happen if the target size decreases due to capital changes
+                order = OrderEvent(strategy_id, event.symbol, 'MKT', abs(trade_quantity), 'SELL')
+                self.event_queue.put(order)
+                logger.info(f"Generated REDUCE order for {strategy_id}: SELL {abs(trade_quantity)} {event.symbol}")
 
     def process_fill(self, event: FillEvent):
-        """Updates portfolio state on a per-strategy basis after a fill."""
-        self.fill_counter.increment()
+        """
+        Updates the holdings and cash for the specific strategy that
+        generated the trade.
+        """
         strategy_id = event.strategy_id
         if not strategy_id or strategy_id not in self.holdings:
             logger.error(f"Fill event for {event.symbol} has invalid strategy_id '{strategy_id}'. Cannot attribute P&L.")
             return
 
         symbol_holdings = self.holdings[strategy_id][event.symbol]
-        
+
         if event.direction == 'BUY':
             new_total_cost = symbol_holdings['cost_basis'] * symbol_holdings['shares'] + event.fill_cost
             symbol_holdings['shares'] += event.quantity
@@ -153,54 +185,59 @@ class LivePortfolioManager:
         self._update_total_equity()
 
     def _update_total_equity(self):
-        """Calculates total portfolio value and updates the RiskManager."""
+        """
+        Calculates the total portfolio value across all strategy sleeves and
+        updates the central RiskManager.
+        """
         total_market_value = 0
         for sid in self.holdings:
             for symbol, data in self.holdings[sid].items():
                 if data['shares'] != 0:
                     last_price = self.latest_market_data.get(symbol, {}).get('close', 0)
                     total_market_value += data['shares'] * last_price
-        
+
         total_cash = sum(self.strategy_cash.values())
         total_portfolio_value = total_cash + total_market_value
         self.risk_manager.update_equity(total_portfolio_value)
 
-    def run_optimization(self):
-        """Calculates daily returns for each strategy and triggers the optimizer."""
-        logger.info("Running periodic performance tracking for optimizer...")
-        daily_returns = {}
-        for sid in self.optimizer.strategy_ids:
+    def run_allocation(self, current_date: datetime.date):
+        """
+        Periodically re-calculates strategy weights using HRP. In a live system,
+        this might trigger rebalancing trades. In this simplified version, it
+        updates the target weights for future capital allocation.
+        """
+        if self.last_allocation_date and (current_date - self.last_allocation_date).days < 30:
+            return # Re-run HRP allocation monthly
+
+        logger.info(f"Running HRP allocation on {current_date}...")
+        self.last_allocation_date = current_date
+
+        # 1. Calculate daily returns for each strategy to build a history
+        for sid in self.strategies.keys():
             market_value = sum(
                 data['shares'] * self.latest_market_data.get(symbol, {}).get('close', 0)
-                for symbol, data in self.holdings[sid].items() if data['shares'] != 0
+                for symbol, data in self.holdings[sid].items()
             )
             current_equity = self.strategy_cash[sid] + market_value
             daily_return = (current_equity / self.last_day_equity[sid] - 1) if self.last_day_equity[sid] != 0 else 0
-            daily_returns[sid] = daily_return
+            self.strategy_returns_df.loc[current_date, sid] = daily_return
             self.last_day_equity[sid] = current_equity
-            
-        self.optimizer.track_daily_returns(daily_returns)
-        self.optimizer.calculate_optimal_weights()
 
-    def _get_latest_atr(self, symbol: str) -> Optional[float]:
-        if self.backtest_mode or not self.feature_store:
-            return None
-        try:
-            features = self.feature_store.get_online_features(features=["all_ticker_features:atr_20"], entity_rows=[{"ticker_id": symbol}]).to_dict()
-            return features['atr_20'][0]
-        except Exception:
-            return None
+        # Keep a rolling window of returns for the covariance calculation
+        self.strategy_returns_df = self.strategy_returns_df.tail(self.allocation_lookback)
+        if len(self.strategy_returns_df) < 20: # Need a minimum history for a stable covariance matrix
+            logger.warning("Not enough return history to run HRP. Using previous weights.")
+            return
 
-    def _is_signal_ml_approved(self, symbol: str) -> bool:
-        if self.backtest_mode or not self.ml_model:
-            return True
-        try:
-            model_feature_refs = ["all_ticker_features:rsi_14", "all_ticker_features:sma_200", "all_ticker_features:vol_regime"]
-            feature_vector = self.feature_store.get_online_features(features=model_feature_refs, entity_rows=[{"ticker_id": symbol}]).to_df()
-            if feature_vector.empty: return True
-            features_for_prediction = feature_vector[["rsi_14", "sma_200", "vol_regime"]]
-            prediction = self.ml_model.predict(features_for_prediction)[0]
-            return prediction == 1
-        except Exception as e:
-            logger.error(f"Error during ML prediction for {symbol}: {e}. Approving signal by default.")
-            return True
+        # 2. Calculate new weights with HRP
+        cov_matrix = self.strategy_returns_df.cov()
+        new_weights = get_hrp_weights(cov_matrix)
+        
+        if not new_weights.empty:
+            self.strategy_weights = new_weights.to_dict()
+            logger.info(f"HRP allocation complete. New target weights: {self.strategy_weights}")
+        else:
+            logger.error("HRP allocation failed to produce weights. Retaining previous weights.")
+
+        # In a live system, one might reallocate cash here. For simplicity,
+        # we let cash drift and use the new weights for future calculations.
